@@ -75,7 +75,7 @@ const tabs: { name: AppTab; icon: typeof MessageCircle; endpoint: string }[] = [
   { name: "Chat", icon: MessageCircle, endpoint: "POST /api/v1/text" },
   { name: "Image", icon: ImageIcon, endpoint: "POST /api/v1/images" },
   { name: "Video", icon: Video, endpoint: "POST /api/v1/videos/create" },
-  { name: "Audio", icon: AudioLines, endpoint: "POST /api/v1/audio" },
+  { name: "Audio", icon: AudioLines, endpoint: "POST /api/v1/audio/notes" },
   { name: "Cam", icon: VideoIcon, endpoint: "POST /api/v1/cam/create" },
 ];
 
@@ -182,13 +182,35 @@ function normalizeCharacters(payload: unknown): Character[] {
   return (candidates as Record<string, unknown>[])
     .map((entry) => ({
       character_id: String(entry.character_id ?? entry.characterId ?? entry.id ?? ""),
-      name: String(entry.name ?? entry.character_name ?? "Unnamed character"),
+      // customer-character listings answer firstName/lastName rather than a
+      // single name field (verified live, 16 Aug 2026).
+      name: String(
+        entry.name
+          ?? entry.character_name
+          ?? [entry.firstName, entry.lastName].filter(Boolean).join(" ")
+          ?? "Unnamed character",
+      ) || "Unnamed character",
       age: entry.age as string | number | undefined,
       occupation: (entry.occupation ?? entry.job ?? entry.profession) as string | undefined,
-      profile_image_url: (entry.profile_image_url ?? entry.profileImageUrl ?? entry.image_url ?? entry.avatar_url) as string | undefined,
+      profile_image_url: (entry.profile_image_url ?? entry.profileImageUrl ?? entry.image_url ?? entry.avatar_url ?? entry.sfwImage) as string | undefined,
       type: (entry.type ?? entry.character_type) as string | undefined,
     }))
     .filter((character) => Boolean(character.character_id));
+}
+
+/**
+ * POST /rooms requires a user_id (verified live — the documented body without
+ * it answers 400). The playground has no accounts, so a stable per-browser
+ * identifier stands in for one.
+ */
+function playgroundUserId() {
+  const KEY = "oh-api-playground-user-id";
+  let stored = window.localStorage.getItem(KEY);
+  if (!stored) {
+    stored = `playground-${crypto.randomUUID()}`;
+    window.localStorage.setItem(KEY, stored);
+  }
+  return stored;
 }
 
 function statusTone(status: string) {
@@ -295,7 +317,9 @@ export default function Home() {
     setCharactersLoading(true);
     setCharacterError("");
     try {
-      const body = await request("/api/v1/characters");
+      // GET /api/v1/characters does not exist on the live service (verified
+      // 16 Aug 2026); the customer listing is what the key can actually see.
+      const body = await request("/api/v1/characters/customer-characters");
       const nextCharacters = normalizeCharacters(body);
       setCharacters(nextCharacters);
       if (!nextCharacters.length) {
@@ -314,7 +338,7 @@ export default function Home() {
   async function createRoom(characterId: string) {
     setRoomLoading(true);
     try {
-      const body = await request("/api/v1/rooms", { method: "POST", body: JSON.stringify({ character_id: characterId }) });
+      const body = await request("/api/v1/rooms", { method: "POST", body: JSON.stringify({ character_id: characterId, user_id: playgroundUserId() }) });
       const nextRoomId = getRoomId(body);
       if (!nextRoomId) {
         const problem = new Error("The room was created, but the response did not contain a room_id.") as ApiProblem;
@@ -408,14 +432,18 @@ export default function Home() {
     setGenerating(true);
     setGeneration(null);
     setGenerationError("");
-    const endpoint = kind === "image" ? "/api/v1/images" : kind === "video" ? "/api/v1/videos/create" : "/api/v1/audio";
+    // Audio is the one synchronous route and it lives at /audio/notes with
+    // the text in `prompt` (plus room context); /api/v1/audio answers 403
+    // "Unknown endpoint" on the live service. A bare url in the response is
+    // already a finished result — the job_id branch below handles that.
+    const endpoint = kind === "image" ? "/api/v1/images" : kind === "video" ? "/api/v1/videos/create" : "/api/v1/audio/notes";
     const payload = kind === "image"
-      ? { character_id: selectedCharacter.character_id, prompt: input }
+      ? { character_id: selectedCharacter.character_id, prompt: input, prompt_enhancement: false, resolution: "9:16" }
       : kind === "video"
         ? videoMode === "image"
           ? { image_url: imageUrl.trim(), prompt: input }
           : { character_id: selectedCharacter.character_id, prompt: input }
-        : { character_id: selectedCharacter.character_id, text: input };
+        : { character_id: selectedCharacter.character_id, ...(roomId ? { room_id: roomId } : {}), prompt: input, text: input };
 
     try {
       const body = await request(endpoint, { method: "POST", body: JSON.stringify(payload) });
